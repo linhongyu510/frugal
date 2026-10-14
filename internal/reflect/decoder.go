@@ -85,10 +85,18 @@ func (d *tDecoder) Decode(b []byte, base unsafe.Pointer, sd *structDesc, maxdept
 
 	i := 0
 	for {
+		if i >= len(b) {
+			return i, io.ErrShortBuffer
+		}
 		tp := ttype(b[i])
 		i++
 		if tp == tSTOP {
 			break
+		}
+		// A non-STOP field always has a two-byte id. Fixed-size wire types also
+		// need their complete value before we inspect the Go field descriptor.
+		if len(b)-i < 2+int(typeToSize[tp]) {
+			return i, io.ErrShortBuffer
 		}
 		fid := binary.BigEndian.Uint16(b[i:])
 		i += 2
@@ -216,6 +224,9 @@ func (d *tDecoder) decodeType(t *tType, b []byte, p unsafe.Pointer, maxdepth int
 		return 0, errDepthLimitExceeded
 	}
 	if t.FixedSize > 0 {
+		if len(b) < t.FixedSize {
+			return 0, io.ErrShortBuffer
+		}
 		return decodeFixedSizeTypes(t.T, b, p), nil
 	}
 	switch t.T {
@@ -315,6 +326,10 @@ func (d *tDecoder) decodeType(t *tType, b []byte, p unsafe.Pointer, maxdepth int
 				tmp = sliceK
 			}
 			if kt.FixedSize > 0 {
+				if len(b)-i < kt.FixedSize {
+					err = io.ErrShortBuffer
+					break
+				}
 				i += decodeFixedSizeTypes(kt.T, b[i:], tmp)
 			} else {
 				if n, err = d.decodeType(kt, b[i:], tmp, maxdepth-1); err != nil {
@@ -332,6 +347,10 @@ func (d *tDecoder) decodeType(t *tType, b []byte, p unsafe.Pointer, maxdepth int
 				tmp = sliceV
 			}
 			if vt.FixedSize > 0 {
+				if len(b)-i < vt.FixedSize {
+					err = io.ErrShortBuffer
+					break
+				}
 				i += decodeFixedSizeTypes(vt.T, b[i:], tmp)
 			} else {
 				if n, err = d.decodeType(vt, b[i:], tmp, maxdepth-1); err != nil {
@@ -376,7 +395,7 @@ func (d *tDecoder) decodeType(t *tType, b []byte, p unsafe.Pointer, maxdepth int
 
 		// reject corrupted lengths before allocating the slice: every element
 		// needs at least minWireSize[et] bytes, so l elements can not fit if
-		// they exceed the remaining buffer. likely the data is broken.
+		// they exceed the remaining buffer. likely data is broken.
 		if remain := len(b) - i; l > remain/int(minWireSize[et.WT]) {
 			return i, newSizeExceedsBufferException(l, remain)
 		}
@@ -413,6 +432,7 @@ func (d *tDecoder) decodeType(t *tType, b []byte, p unsafe.Pointer, maxdepth int
 			}
 
 			if et.FixedSize > 0 {
+				// The container length check guarantees all fixed-size elements fit.
 				i += decodeFixedSizeTypes(et.T, b[i:], vp)
 			} else {
 				n, err := d.decodeType(et, b[i:], vp, maxdepth-1)
